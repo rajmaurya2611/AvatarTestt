@@ -1,3 +1,4 @@
+// src/components/AvatarPanel.jsx
 import React, { useEffect, useRef } from "react";
 import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
 
@@ -18,7 +19,7 @@ export default function AvatarPanel({ speechText }) {
     let cancelled = false;
     (async () => {
       try {
-        // ─── 1️⃣ Fetch TURN token ───
+        // 1️⃣ Fetch TURN token
         const resp = await fetch(
           `${endpoint}/cognitiveservices/avatar/relay/token/v1`,
           { headers: { "Ocp-Apim-Subscription-Key": key } }
@@ -27,18 +28,17 @@ export default function AvatarPanel({ speechText }) {
         const { Urls, Username, Password } = await resp.json();
         console.log("[Avatar] relay payload:", Urls);
 
-        // ─── 2️⃣ ICE servers list (UDP TURN, TCP TURN, STUN) ───
+        // 2️⃣ Build ICE servers list (UDP TURN, TCP TURN, STUN)
         const iceServers = [
           { urls: Urls, username: Username, credential: Password },
           { urls: Urls.map(u => `${u}?transport=tcp`), username: Username, credential: Password },
-          { urls: ["stun:stun.l.google.com:19302"] }
+          { urls: ["stun:stun.l.google.com:19302"] },
         ];
 
-        // ─── 3️⃣ Create & instrument RTCPeerConnection ───
+        // 3️⃣ Create & wire up RTCPeerConnection
         const pc = new RTCPeerConnection({ iceServers });
         pcRef.current = pc;
-        pc.onicecandidate = e =>
-          console.log("[Avatar] ICE candidate:", e.candidate);
+        pc.onicecandidate = e => console.log("[Avatar] ICE candidate:", e.candidate);
         pc.oniceconnectionstatechange = () =>
           console.log("[Avatar] ICE state:", pc.iceConnectionState);
         pc.ontrack = ev => {
@@ -49,40 +49,39 @@ export default function AvatarPanel({ speechText }) {
           }
         };
 
-        // ─── 4️⃣ Configure AvatarSynthesizer ───
+        // 4️⃣ Configure AvatarSynthesizer
         const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(key, region);
-        const avatarConfig = new SpeechSDK.AvatarConfig(
-          character,
-          style,
-          SpeechSDK.AvatarVideoFormat.MP4
-        );
+        const avatarConfig = new SpeechSDK.AvatarConfig(character, style, SpeechSDK.AvatarVideoFormat.MP4);
         avatarConfig.remoteIceServers = iceServers;
 
-        const synthesizer = new SpeechSDK.AvatarSynthesizer(
-          speechConfig,
-          avatarConfig
-        );
+        const synthesizer = new SpeechSDK.AvatarSynthesizer(speechConfig, avatarConfig);
         synthRef.current = synthesizer;
 
-        synthesizer.avatarSynthesisStarted   = () =>
-          console.log("[Avatar] session started");
-        synthesizer.avatarSynthesisCompleted = () =>
-          console.log("[Avatar] turn completed");
         synthesizer.canceled = (_, evt) =>
           console.error("[Avatar] error", evt.errorDetails);
 
-        // ─── *DIAGNOSTIC* Log SDK ICE servers before start ───
+        synthesizer.avatarEventReceived = (_, evt) => {
+          console.log("[AvatarEvent]", evt.eventType, evt);
+          if (evt.eventType === "IceConnectionStateChanged") {
+            console.log("[AvatarEvent] ICE state (via SDK):", evt.iceConnectionState);
+          }
+        };
+
+        synthesizer.avatarSynthesisStarted   = () => console.log("[Avatar] session started");
+        synthesizer.avatarSynthesisCompleted = () => console.log("[Avatar] turn completed");
+
         console.log("[Avatar] SDK iceServers before start:", synthesizer.iceServers);
 
-        // ─── Subscribe to high‑level avatar events ───
-        synthesizer.avatarEventReceived = (_, evt) =>
-          console.log("[AvatarEvent]", evt.eventType, evt);
+        // 5️⃣ DEFER the start call one tick so everything’s hooked up
+        setTimeout(() => {
+          if (cancelled) return;
+          synthesizer.startAvatarAsync(
+            pc,
+            () => console.log("[Avatar] startAvatarAsync succeeded"),
+            err => console.error("[Avatar] startAvatarAsync error", err)
+          );
+        }, 0);
 
-        // ─── 5️⃣ Start the avatar session, passing YOUR pc ───
-        await synthesizer.startAvatarAsync(pc);
-
-        // ─── *DIAGNOSTIC* Log SDK ICE servers after start ───
-        console.log("[Avatar] SDK iceServers after start:", synthesizer.iceServers);
       } catch (err) {
         if (!cancelled) console.error("[Avatar] init error", err);
       }
@@ -95,7 +94,7 @@ export default function AvatarPanel({ speechText }) {
     };
   }, []);
 
-  // Speak whenever speechText updates
+  // 6️⃣ Speak when speechText changes
   useEffect(() => {
     const synth = synthRef.current;
     if (synth && speechText) {
@@ -117,10 +116,7 @@ export default function AvatarPanel({ speechText }) {
         muted
         style={{ width: 480, height: 270, backgroundColor: "#000" }}
       />
-      <audio
-        ref={audioRef}
-        autoPlay
-      />
+      <audio ref={audioRef} autoPlay />
     </div>
   );
 }
