@@ -1,129 +1,126 @@
-// src/components/interviewBot/AvatarPanel.jsx
-import React, { useEffect, useRef } from 'react';
-import * as SpeechSDK from 'microsoft-cognitiveservices-speech-sdk';
+import React, { useEffect, useRef } from "react";
+import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
 
-export default function AvatarPanel({ speech, onError, onEnd }) {
-  const pcRef          = useRef(null);
-  const synthesizerRef = useRef(null);
+export default function AvatarPanel({ speechText }) {
+  const videoRef = useRef(null);
+  const audioRef = useRef(null);
+  const pcRef    = useRef(null);
+  const synthRef = useRef(null);
 
   useEffect(() => {
+    console.log("[Avatar] init…]");
     const key       = import.meta.env.VITE_COG_SVC_KEY;
     const region    = import.meta.env.VITE_COG_SVC_REGION;
-    const endpoint  = import.meta.env.VITE_SPEECH_ENDPOINT.replace(/\/$/, '');
+    const endpoint  = import.meta.env.VITE_SPEECH_ENDPOINT.replace(/\/$/, "");
     const character = import.meta.env.VITE_AVATAR_CHARACTER;
     const style     = import.meta.env.VITE_AVATAR_STYLE;
 
     let cancelled = false;
-
     (async () => {
       try {
-        // ─── 1️⃣ Fetch TURN/STUN info ───
-        const relayUrl = `${endpoint}/cognitiveservices/avatar/relay/token/v1`;
-        const resp     = await fetch(relayUrl, {
-          headers: { 'Ocp-Apim-Subscription-Key': key }
-        });
-        if (!resp.ok) throw new Error(`ICE fetch failed: ${resp.status}`);
-        const data = await resp.json();
-        console.log('[AvatarPanel] relay payload:', data);
+        // ─── 1️⃣ Fetch TURN token ───
+        const resp = await fetch(
+          `${endpoint}/cognitiveservices/avatar/relay/token/v1`,
+          { headers: { "Ocp-Apim-Subscription-Key": key } }
+        );
+        if (!resp.ok) throw new Error(`relay token error: ${resp.status}`);
+        const { Urls, Username, Password } = await resp.json();
+        console.log("[Avatar] relay payload:", Urls);
 
-        // ─── 2️⃣ Normalize to iceServers[] ───
-        let iceServers;
-        if (Array.isArray(data.iceServers)) {
-          iceServers = data.iceServers;
-        } else if (Array.isArray(data.Urls)) {
-          iceServers = [{
-            urls:       data.Urls,
-            username:   data.Username,
-            credential: data.Password
-          }];
-        } else {
-          throw new Error('No iceServers returned from avatar relay');
-        }
-        // Optional STUN fallback
-        iceServers.push({ urls: ['stun:stun.l.google.com:19302'] });
+        // ─── 2️⃣ ICE servers list (UDP TURN, TCP TURN, STUN) ───
+        const iceServers = [
+          { urls: Urls, username: Username, credential: Password },
+          { urls: Urls.map(u => `${u}?transport=tcp`), username: Username, credential: Password },
+          { urls: ["stun:stun.l.google.com:19302"] }
+        ];
 
-        // ─── 3️⃣ Build RTCPeerConnection ───
+        // ─── 3️⃣ Create & instrument RTCPeerConnection ───
         const pc = new RTCPeerConnection({ iceServers });
         pcRef.current = pc;
-
-        pc.oniceconnectionstatechange = () => {
-          console.log('[AvatarPanel] ICE state:', pc.iceConnectionState);
-        };
-
+        pc.onicecandidate = e =>
+          console.log("[Avatar] ICE candidate:", e.candidate);
+        pc.oniceconnectionstatechange = () =>
+          console.log("[Avatar] ICE state:", pc.iceConnectionState);
         pc.ontrack = ev => {
-          const el = ev.track.kind === 'video'
-            ? document.getElementById('remoteVideo')
-            : document.getElementById('audioPlayer');
+          const el = ev.track.kind === "video" ? videoRef.current : audioRef.current;
           if (el) {
             el.srcObject = ev.streams[0];
-            el.play().catch(e => console.warn('Playback error', e));
+            el.play().catch(() => {});
           }
         };
 
         // ─── 4️⃣ Configure AvatarSynthesizer ───
         const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(key, region);
-        const avatarConfig = new SpeechSDK.AvatarConfig(character, style);
-        avatarConfig.videoFormat = SpeechSDK.AvatarVideoFormat.MP4;
+        const avatarConfig = new SpeechSDK.AvatarConfig(
+          character,
+          style,
+          SpeechSDK.AvatarVideoFormat.MP4
+        );
+        avatarConfig.remoteIceServers = iceServers;
 
-        const synthesizer = new SpeechSDK.AvatarSynthesizer(speechConfig, avatarConfig);
-        synthesizerRef.current = synthesizer;
+        const synthesizer = new SpeechSDK.AvatarSynthesizer(
+          speechConfig,
+          avatarConfig
+        );
+        synthRef.current = synthesizer;
 
-        synthesizer.avatarSynthesisStarted = () => {
-          console.log('[AvatarPanel] Avatar session started');
-        };
-        synthesizer.avatarSynthesisCompleted = () => {
-          console.log('[AvatarPanel] Avatar turn completed');
-          onEnd?.();
-        };
-        synthesizer.canceled = (_, evt) => {
-          console.error('[AvatarPanel] Synth canceled', evt.errorDetails);
-          onError?.(new Error(evt.errorDetails));
-        };
+        synthesizer.avatarSynthesisStarted   = () =>
+          console.log("[Avatar] session started");
+        synthesizer.avatarSynthesisCompleted = () =>
+          console.log("[Avatar] turn completed");
+        synthesizer.canceled = (_, evt) =>
+          console.error("[Avatar] error", evt.errorDetails);
 
-        // ─── 5️⃣ Start streaming avatar ───
+        // ─── *DIAGNOSTIC* Log SDK ICE servers before start ───
+        console.log("[Avatar] SDK iceServers before start:", synthesizer.iceServers);
+
+        // ─── Subscribe to high‑level avatar events ───
+        synthesizer.avatarEventReceived = (_, evt) =>
+          console.log("[AvatarEvent]", evt.eventType, evt);
+
+        // ─── 5️⃣ Start the avatar session, passing YOUR pc ───
         await synthesizer.startAvatarAsync(pc);
+
+        // ─── *DIAGNOSTIC* Log SDK ICE servers after start ───
+        console.log("[Avatar] SDK iceServers after start:", synthesizer.iceServers);
       } catch (err) {
-        if (!cancelled) {
-          console.error('[AvatarPanel] init error', err);
-          onError?.(err);
-        }
+        if (!cancelled) console.error("[Avatar] init error", err);
       }
     })();
 
     return () => {
       cancelled = true;
-      synthesizerRef.current?.close();
+      synthRef.current?.close();
       pcRef.current?.close();
     };
-  }, [onError, onEnd]);
+  }, []);
 
-  // ─── Speak whenever `speech` changes ───
+  // Speak whenever speechText updates
   useEffect(() => {
-    if (!speech) return;
-    const synth = synthesizerRef.current;
-    if (!synth) return;
-    console.log('[AvatarPanel] Speaking:', speech);
-    synth.speakTextAsync(
-      speech,
-      () => {},              // success: avatar turn will fire avatarSynthesisCompleted
-      err => onError?.(err)  // failure
-    );
-  }, [speech, onError]);
+    const synth = synthRef.current;
+    if (synth && speechText) {
+      console.log("[Avatar] speaks:", speechText);
+      synth.speakTextAsync(
+        speechText,
+        () => {},
+        err => console.error("[Avatar] speak error", err)
+      );
+    }
+  }, [speechText]);
 
   return (
     <div>
       <video
-        id="remoteVideo"
+        ref={videoRef}
         autoPlay
         playsInline
-        muted={false}
-        style={{
-          width: 480,
-          height: 270,
-          backgroundColor: '#000',
-        }}
+        muted
+        style={{ width: 480, height: 270, backgroundColor: "#000" }}
       />
-      <audio id="audioPlayer" autoPlay />
+      <audio
+        ref={audioRef}
+        autoPlay
+      />
     </div>
   );
 }

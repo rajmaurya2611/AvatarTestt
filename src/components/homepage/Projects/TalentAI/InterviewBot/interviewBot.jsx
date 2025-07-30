@@ -1,11 +1,11 @@
-// src/components/interviewBot/InterviewBot.jsx
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
 
 import MainHeader   from "../MainHeader";
 import Sidebar      from "../Sidebar";
 import api          from "./services_interviewBot/api";
 import Header       from "./Header";
+import AvatarPanel  from "./AvatarPanel";
 import MessageList  from "./MessageList";
 import MessageInput from "./MessageInput";
 import Timer        from "./Timer";
@@ -13,7 +13,7 @@ import Timer        from "./Timer";
 import "./interviewBot.css";
 
 export default function InterviewBot() {
-  // — Chat & STT state
+  // — file uploads & interview state —
   const [cvFile, setCvFile]       = useState(null);
   const [jdFile, setJdFile]       = useState(null);
   const [loading, setLoading]     = useState(false);
@@ -25,146 +25,48 @@ export default function InterviewBot() {
   const [input, setInput]         = useState("");
   const [timeLeft, setTimeLeft]   = useState(1800);
 
-  const recognizerRef = useRef(null);
-  const bufRef        = useRef("");
-  const pauseTimer    = useRef(null);
-
+  // Sync historyRef
   useEffect(() => { historyRef.current = history; }, [history]);
+
+  // Countdown timer
   useEffect(() => {
     if (!started) return;
     const tid = setInterval(() => setTimeLeft(t => Math.max(t - 1, 0)), 1000);
     return () => clearInterval(tid);
   }, [started]);
 
-  // — Avatar streaming refs
-  const videoRef       = useRef(null);
-  const audioRef       = useRef(null);
-  const pcRef          = useRef(null);
-  const synthesizerRef = useRef(null);
+  // STT refs
+  const recognizerRef = useRef(null);
+  const bufRef        = useRef("");
+  const pauseTimer    = useRef(null);
 
-  // Stop STT when avatar finishes
-  const end = useCallback(() => {
-    recognizerRef.current?.stopContinuousRecognitionAsync(
-      () => console.log("STT stopped"),
-      err => console.error("STT stop error", err)
-    );
-    setStarted(false);
-  }, []);
-
-  // — Initialize Avatar + PeerConnection once —
-  useEffect(() => {
-    const key       = import.meta.env.VITE_COG_SVC_KEY;
-    const region    = import.meta.env.VITE_COG_SVC_REGION;
-    const endpoint  = import.meta.env.VITE_SPEECH_ENDPOINT.replace(/\/$/, "");
-    const character = import.meta.env.VITE_AVATAR_CHARACTER;
-    const style     = import.meta.env.VITE_AVATAR_STYLE;
-
-    let cancelled = false;
-    (async () => {
-      try {
-        // 1️⃣ Fetch ICE servers
-        const resp = await fetch(
-          `${endpoint}/cognitiveservices/avatar/relay/token/v1`,
-          { headers: { "Ocp-Apim-Subscription-Key": key } }
-        );
-        if (!resp.ok) throw new Error(`relay token error: ${resp.status}`);
-        const { Urls, Username, Password } = await resp.json();
-        console.log("[Avatar] relay payload:", { Urls, Username });
-
-        // 2️⃣ Build iceServers array (TURN + STUN)
-        const iceServers = [
-          { urls: Urls, username: Username, credential: Password },
-          { urls: ["stun:stun.l.google.com:19302"] }
-        ];
-
-        // 3️⃣ Create PeerConnection
-        const pc = new RTCPeerConnection({ iceServers });
-        pcRef.current = pc;
-
-        // 3a) Log ICE state changes
-        pc.oniceconnectionstatechange = () =>
-          console.log("[Avatar] ICE state:", pc.iceConnectionState);
-
-        // 3b) Attach tracks to video/audio
-        pc.ontrack = ev => {
-          const el = ev.track.kind === "video" ? videoRef.current : audioRef.current;
-          if (el) {
-            el.srcObject = ev.streams[0];
-            el.play().catch(e => console.warn("Playback error:", e));
-          }
-        };
-
-        // 4️⃣ Configure AvatarSynthesizer
-        const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(key, region);
-        const avatarConfig = new SpeechSDK.AvatarConfig(
-          character,
-          style,
-          SpeechSDK.AvatarVideoFormat.MP4
-        );
-        avatarConfig.remoteIceServers = iceServers;
-
-        const synthesizer = new SpeechSDK.AvatarSynthesizer(
-          speechConfig,
-          avatarConfig
-        );
-        synthesizerRef.current = synthesizer;
-
-        synthesizer.avatarSynthesisStarted   = () =>
-          console.log("[Avatar] session started");
-        synthesizer.avatarSynthesisCompleted = () => {
-          console.log("[Avatar] turn completed");
-          end();
-        };
-        synthesizer.canceled = (_, evt) =>
-          console.error("[Avatar] error", evt.errorDetails);
-
-        // 5️⃣ Start streaming via your PC
-        await synthesizer.startAvatarAsync(pc);
-      } catch (err) {
-        if (!cancelled) console.error("[Avatar] init error", err);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      synthesizerRef.current?.close();
-      pcRef.current?.close();
-    };
-  }, [end]);
-
-  // — Speak each LLM reply —
-  useEffect(() => {
-    const synth = synthesizerRef.current;
-    if (synth && botSpeech) {
-      console.log("[Avatar] Speaking:", botSpeech);
-      synth.speakTextAsync(
-        botSpeech,
-        () => {},
-        err => console.error("[Avatar] speak error", err)
-      );
-    }
-  }, [botSpeech]);
-
-  // — STT & chat start —
+  // Start interview: upload → chat → STT setup
   const start = async () => {
-    if (!cvFile || !jdFile) return alert("Upload both CV and JD");
+    if (!cvFile || !jdFile) {
+      alert("Please upload both CV and JD");
+      return;
+    }
     setLoading(true);
     try {
-      // Upload & initial chat
+      // 1️⃣ Upload files & extract text
       const form = new FormData();
       form.append("cv", cvFile);
       form.append("jd", jdFile);
       const { data: { cvText, jdText } } = await api.post("/upload", form);
+
+      // 2️⃣ Initial LLM reply
       const { data } = await api.post("/chat", {
-        cv: cvText, jd: jdText, messages: []
+        cv: cvText,
+        jd: jdText,
+        messages: []
       });
       setHistory(data);
-      const first = data.slice(-1)[0].content;
-      setMessages([{ sender: "HR Bot", text: first }]);
-      setBotSpeech(first);
+      const firstReply = data[data.length - 1].content;
+      setMessages([{ sender: "HR Bot", text: firstReply }]);
+      setBotSpeech(firstReply);
       setStarted(true);
 
-      // STT setup
+      // 3️⃣ Azure STT configuration
       const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
         import.meta.env.VITE_COG_SVC_KEY,
         import.meta.env.VITE_COG_SVC_REGION
@@ -174,17 +76,17 @@ export default function InterviewBot() {
         SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
         "2000"
       );
-      const recog = new SpeechSDK.SpeechRecognizer(
+      const recognizer = new SpeechSDK.SpeechRecognizer(
         speechConfig,
         SpeechSDK.AudioConfig.fromDefaultMicrophoneInput()
       );
-      recognizerRef.current = recog;
+      recognizerRef.current = recognizer;
 
-      recog.recognized = (_, e) => {
-        if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
-        const t = e.result.text.trim();
-        if (!t) return;
-        bufRef.current = bufRef.current ? bufRef.current + " " + t : t;
+      recognizer.recognized = (_, evt) => {
+        if (evt.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
+        const text = evt.result.text.trim();
+        if (!text) return;
+        bufRef.current = bufRef.current ? bufRef.current + " " + text : text;
         clearTimeout(pauseTimer.current);
         pauseTimer.current = setTimeout(async () => {
           const userText = bufRef.current.trim();
@@ -192,12 +94,12 @@ export default function InterviewBot() {
           setHistory(h => [...h, { role: "user", content: userText }]);
           setMessages(m => [...m, { sender: "You", text: userText }]);
           try {
-            const { data: newHist } = await api.post("/chat", {
+            const { data: newHistory } = await api.post("/chat", {
               messages: [...historyRef.current, { role: "user", content: userText }],
               userText
             });
-            setHistory(newHist);
-            const reply = newHist.slice(-1)[0].content;
+            setHistory(newHistory);
+            const reply = newHistory[newHistory.length - 1].content;
             setMessages(m => [...m, { sender: "HR Bot", text: reply }]);
             setBotSpeech(reply);
           } catch (err) {
@@ -206,19 +108,19 @@ export default function InterviewBot() {
         }, 800);
       };
 
-      recog.startContinuousRecognitionAsync(
+      recognizer.startContinuousRecognitionAsync(
         () => console.log("STT started"),
         err => console.error("STT error", err)
       );
     } catch (err) {
-      console.error("Start error", err);
+      console.error("Start interview error", err);
       alert("Failed to start interview");
     } finally {
       setLoading(false);
     }
   };
 
-  // — Manual text send —
+  // Manual text send fallback
   const sendText = async () => {
     const txt = input.trim();
     if (!txt) return;
@@ -226,24 +128,34 @@ export default function InterviewBot() {
     setHistory(h => [...h, { role: "user", content: txt }]);
     setMessages(m => [...m, { sender: "You", text: txt }]);
     try {
-      const { data: newHist } = await api.post("/chat", {
+      const { data: newHistory } = await api.post("/chat", {
         messages: [...historyRef.current, { role: "user", content: txt }],
         userText: txt
       });
-      setHistory(newHist);
-      const reply = newHist.slice(-1)[0].content;
+      setHistory(newHistory);
+      const reply = newHistory[newHistory.length - 1].content;
       setMessages(m => [...m, { sender: "HR Bot", text: reply }]);
       setBotSpeech(reply);
     } catch (err) {
-      console.error("SendText error", err);
-      alert("Failed to send");
+      console.error("Send text error", err);
+      alert("Failed to send message");
     }
+  };
+
+  // Stop STT when interview ends
+  const end = () => {
+    recognizerRef.current?.stopContinuousRecognitionAsync(
+      () => console.log("STT stopped"),
+      err => console.error("STT stop error", err)
+    );
+    setStarted(false);
   };
 
   return (
     <main>
       <MainHeader />
       <Sidebar />
+
       <div style={{ marginLeft: 50 }}>
         <Header
           cvFile={cvFile}
@@ -255,20 +167,14 @@ export default function InterviewBot() {
           started={started}
           timeLeft={timeLeft}
         />
+
         <Timer timeLeft={timeLeft} running={started} />
 
         <div className="interview-bot-body">
-          {/* 1️⃣ video is muted to satisfy autoplay */}
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            style={{ width: 480, height: 270, backgroundColor: "#000" }}
-          />
-          <audio ref={audioRef} autoPlay muted /> {/* muted here too */}
+          {/* Avatar stays mounted & lip-syncs each botSpeech */}
+          <AvatarPanel speechText={botSpeech} />
 
-          {/* Transcript */}
+          {/* Live transcript */}
           <div className="interview-bot-transcript-container">
             <div className="interview-bot-transcript">
               <div className="interview-bot-transcript-header">
